@@ -1,0 +1,20 @@
+name: release-please
+
+# Opens/updates a release PR from Conventional Commits on main; merging it tags vX.Y.Z.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # PRs opened with the default GITHUB_TOKEN don't trigger CI. Set this secret to a
+          # fine-grained PAT (contents + pull requests: write) so release PRs get checks.
+          token: ${{ secrets.RELEASE_PLEASE || github.token }}
