@@ -72,3 +72,5 @@ Settled; reviewers shouldn't re-raise these.
 - The installer doesn't install the `claude` CLI (images ship it); it only warns.
 - The VS Code extension is unpinned (latest) and only installs when `code` works.
 - zsh must already be installed (`curl | zsh` can't run without it).
+- `vimrc` keeps fzf's `do: fzf#install()` hook, which downloads the fzf binary without
+  a checksum (same as upstream).
