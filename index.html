@@ -136,8 +136,8 @@ select_repo_ref() {
   if [[ -z "$ref" ]] && { true </dev/tty; } 2>/dev/null; then
     ref="$(pick_tag)"
   elif [[ -z "$ref" ]]; then
-    local tags; tags="$(list_tags 2>/dev/null)" || tags=""
-    ref="${${(@f)tags}[1]:-main}"
+    local -a tags=("${(@f)$(list_tags 2>/dev/null || true)}")
+    ref="${tags[1]:-main}"
   fi
   # Exact refs only (ls-remote patterns tail-match, so `main` would match feat/main).
   local out sha
