@@ -3,7 +3,7 @@
 # Integration test for the installer (index.html). Runs it end-to-end as root inside
 # a fresh Debian container with the repo mounted read-only at /repo -- see
 # tests/run-in-docker.sh and CI. Uses a throwaway $HOME, local git fixtures for this
-# repo and for ai-rules-central, and stub `cde-init`/`claude`/`code` binaries, so it
+# repo and for ai-rules-central, and stub `cde-init`/`claude`/`code`/`gh`/`docker`, so it
 # never touches real dotfiles and needs no GitHub credentials.
 
 # shellcheck disable=SC2088  # "~" in pass/fail messages is display text
@@ -91,7 +91,33 @@ case "\$1" in
   *) exit 1 ;;
 esac
 EOF
-chmod +x "$FIX/bin/cde-init" "$FIX/bin/claude" "$FIX/bin/code"
+# Fake GitHub: repos are bare git repos under $FIX/gh; <repo>.private holds true/false.
+cat > "$FIX/bin/gh" <<EOF
+#!/bin/bash
+G="$FIX/gh"
+case "\$1 \$2" in
+  "api user") echo tester ;;
+  "repo view")
+    [ -d "\$G/\$3.git" ] || { echo "GraphQL: Could not resolve to a Repository with the name '\$3'. (repository)" >&2; exit 1; }
+    echo "\$(cat "\$G/\$3.private") \${3%%/*}" ;;
+  "repo create")
+    git init -q --bare -b main "\$G/\$3.git"; echo true > "\$G/\$3.private"
+    t=\$(mktemp -d); git clone -q "\$G/\$3.git" "\$t" 2>/dev/null; echo "# memory" > "\$t/README.md"
+    git -C "\$t" add -A; git -C "\$t" commit -q -m init; git -C "\$t" push -q origin HEAD:main; rm -rf "\$t" ;;
+  "repo clone") git clone -q "\$G/\$3.git" "\$4" ;;
+  "auth git-credential") exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+cat > "$FIX/bin/docker" <<EOF
+#!/bin/sh
+case "\$1" in
+  info|pull) exit 0 ;;
+  run) cat >/dev/null; exit "\$(cat "$FIX/gitleaks-rc" 2>/dev/null || echo 0)" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$FIX/bin/cde-init" "$FIX/bin/claude" "$FIX/bin/code" "$FIX/bin/gh" "$FIX/bin/docker"
 export PATH="$FIX/bin:$PATH"
 TOKEN="test-oauth-token-DO-NOT-PRINT"
 export REPO_RAW="file://$REPO"
@@ -127,13 +153,57 @@ jq -e '.hasCompletedOnboarding == true' "$HOME/.claude.json" >/dev/null && pass 
 grep -qE 'OK +Claude auth +oauth_token' "$OUT" && pass "summary: Claude auth OK (oauth_token)" || fail "auth not reported OK"
 grep -qx anthropic.claude-code "$FIX/installs" && grep -qE 'OK +VS Code extension +installed' "$OUT" \
   && pass "VS Code extension installed" || fail "extension not installed"
+S="$HOME/.claude/settings.json"; HOOK="$HOME/.claude/hooks/agent-memory-sync.sh"; MEMREMOTE="$FIX/gh/tester/agent-memory.git"
+grep -qE 'OK +agent memory +tester/agent-memory \(created, private\)' "$OUT" && [ -d "$MEMREMOTE" ] \
+  && pass "agent memory repo created as <gh login>/agent-memory, private" || fail "memory repo not created"
+cmp -s "$REPO/claude/hooks/agent-memory-sync.sh" "$HOOK" && [ "$(stat -c %a "$HOOK")" = 700 ] \
+  && pass "memory hook installed and executable" || fail "memory hook missing or not executable"
+jq -e '.autoMemoryDirectory == "~/.agent-memory/memory"
+  and ([.hooks.SessionStart[].hooks[].command] == ["~/.claude/hooks/agent-memory-sync.sh start"])
+  and ([.hooks.Stop[].hooks[].command] == ["~/.claude/hooks/agent-memory-sync.sh push"])
+  and (.permissions.allow | index("Edit(~/.agent-memory/memory/**)") != null)' "$S" >/dev/null \
+  && pass "settings.json wired: memory dir, hooks, permissions" || fail "settings.json not wired: $(cat "$S")"
 [ "$(backups)" = 0 ] && pass "fresh install creates no backups" || fail "unexpected backup dir"
 [ "$(stat -c %a "$HOME/.tmux.conf")" = 600 ] && pass "installed files are private (umask 077)" || fail "umask not applied"
+
+note "Memory hook: clone, sync, secret scan, private check"
+proj="$FIX/proj"; git init -q "$proj"; git -C "$proj" remote add origin https://github.com/acme/widget.git
+mem() { CLAUDE_PROJECT_DIR="$proj" bash "$HOOK" "$@"; }
+pushed() { git --git-dir="$MEMREMOTE" log --format= --name-only main | grep -x "$1" >/dev/null; }
+mem start | grep -q 'No private notes yet for acme/widget' && [ -d "$HOME/.agent-memory/.git" ] \
+  && pass "start clones the memory repo and points at this repo's notes file" || fail "hook start didn't clone"
+mkdir -p "$HOME/.agent-memory/memory"; echo "fact one" > "$HOME/.agent-memory/memory/one.md"
+mem sync; pushed memory/one.md && pass "sync commits and pushes memory" || fail "memory not pushed"
+mkdir -p "$HOME/.agent-memory/projects/acme"; echo "widget notes" > "$HOME/.agent-memory/projects/acme/widget.md"
+mem start | grep -q 'widget notes' && pass "start prints this repo's notes" || fail "notes not printed"
+echo 1 > "$FIX/gitleaks-rc"; echo "leak" > "$HOME/.agent-memory/memory/two.md"
+mem sync; out="$(mem start)"
+! pushed memory/two.md && grep -q 'WARNING.*gitleaks found a secret' <<<"$out" \
+  && pass "a gitleaks finding holds the push and warns" || fail "secret not held: $out"
+rm "$FIX/gitleaks-rc"; git -C "$HOME/.agent-memory" reset -q --hard HEAD~1
+echo false > "$FIX/gh/tester/agent-memory.private"; echo "x" > "$HOME/.agent-memory/memory/three.md"
+mem sync; out="$(mem start)"
+! pushed memory/three.md && grep -q 'must be a private repo owned by tester' <<<"$out" \
+  && pass "a public memory repo holds the push" || fail "pushed to a public repo: $out"
+echo true > "$FIX/gh/tester/agent-memory.private"
+mem sync; out="$(mem start)"
+pushed memory/three.md && ! grep -q WARNING <<<"$out" \
+  && pass "push resumes and the warning clears once private again" || fail "sync didn't recover: $out"
+other="$FIX/other-codespace"; git clone -q "$MEMREMOTE" "$other"
+echo "from b" > "$other/memory/b.md" && git -C "$other" add -A && git -C "$other" commit -q -m b && git -C "$other" push -q
+echo "from a" > "$HOME/.agent-memory/memory/a.md"
+mem sync; [ -f "$HOME/.agent-memory/memory/b.md" ] && pushed memory/a.md \
+  && pass "sync pulls another codespace's notes, then pushes its own" || fail "cross-codespace sync failed"
+echo "via stop" > "$HOME/.agent-memory/memory/stop.md"; mem push
+for _ in $(seq 50); do pushed memory/stop.md && break; sleep 0.2; done
+pushed memory/stop.md && pass "the Stop hook's detached push syncs" || fail "push subcommand didn't sync"
+[ -z "$(AGENT_MEMORY=off mem start)" ] && pass "AGENT_MEMORY=off disables the hook" || fail "AGENT_MEMORY=off still ran"
 
 note "Re-run is a no-op"
 CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" install || fail "re-run exited non-zero"
 [ "$(backups)" = 0 ] && pass "unchanged files are not backed up again" || fail "re-run created a backup"
 grep -qE 'OK +config files +0 updated' "$OUT" && pass "0 config files updated" || fail "re-run rewrote files"
+grep -qE 'OK +agent memory +tester/agent-memory \(private\)' "$OUT" && pass "existing memory repo reused" || fail "memory repo not reported"
 grep -qE 'already installed' "$OUT" && [ "$(wc -l < "$FIX/installs")" = 1 ] \
   && pass "extension not reinstalled" || fail "extension reinstalled"
 
@@ -143,6 +213,10 @@ echo "my own vimrc" > "$FIX/my-vimrc"; ln -sf "$FIX/my-vimrc" "$HOME/.vimrc"
 echo '{"keep": 1}' > "$HOME/.claude.json"
 ysu="$HOME/.oh-my-zsh/custom/plugins/you-should-use"
 git -C "$ysu" commit -q --allow-empty -m tamper
+# A user's own settings, plus a venkat-style memory hook grouped with another Stop hook.
+jq -n '{theme: "dark", permissions: {allow: ["Bash(ls)"]},
+  hooks: {SessionStart: [{hooks: [{type: "command", command: "~/.claude/hooks/agent-memory-sync.sh start", timeout: 5}]}],
+          Stop: [{hooks: [{type: "command", command: "my-stop-hook"}, {type: "command", command: "~/.claude/hooks/agent-memory-sync.sh push"}]}]}}' > "$S"
 git -C "$rules" rm -q .github/prompts/ai-plan.prompt.md && git -C "$rules" commit -q -m "drop ai-plan"
 CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" install || fail "third run exited non-zero"
 cmp -s "$REPO/tmux.conf" "$HOME/.tmux.conf" && pass "edited ~/.tmux.conf restored" || fail "~/.tmux.conf not restored"
@@ -156,9 +230,16 @@ ysu_sha="$(grep -oE 'YOU_SHOULD_USE_SHA="[0-9a-f]{40}"' "$REPO/index.html" | gre
 [ "$(git -C "$ysu" rev-parse HEAD)" = "$ysu_sha" ] && pass "drifted plugin re-cloned at the pinned SHA" || fail "plugin drift not repaired"
 [ ! -e "$HOME/.claude/commands/ai-plan.md" ] && [ ! -L "$HOME/.claude/commands/ai-plan.md" ] \
   && pass "link to a removed upstream prompt cleaned up" || fail "stale /ai-plan link left behind"
+jq -e '.theme == "dark" and (.permissions.allow[0] == "Bash(ls)")
+  and ([.hooks.Stop[].hooks[].command] == ["my-stop-hook", "~/.claude/hooks/agent-memory-sync.sh push"])
+  and ([.hooks.SessionStart[].hooks[] | select(.command | test("agent-memory")) | .timeout] == [120])' "$S" >/dev/null \
+  && jq -e '.theme == "dark"' "$HOME"/.dotfiles-backup-*/.claude/settings.json >/dev/null \
+  && pass "settings.json merged: user keys and hooks kept, one memory hook per event (backed up)" \
+  || fail "settings.json merge wrong: $(cat "$S")"
 
 note "No token, no VS Code, no AI-rules access: warns, still exits 0"
 rm -f "$HOME/.claude.json"; rm -rf "$HOME/.local/share/ai-rules-central"
+echo '{not json' > "$S"
 rm "$FIX/bin/code"
 env -u CLAUDE_CODE_OAUTH_TOKEN AI_RULES_REPO="$FIX/no-access" zsh < "$REPO/index.html" >"$OUT" 2>&1 || fail "exited non-zero"
 grep -qE 'WARN +Claude auth +CLAUDE_CODE_OAUTH_TOKEN not set' "$OUT" && pass "missing token warns" || fail "missing token not reported"
@@ -166,6 +247,13 @@ grep -qE 'WARN +Claude auth +CLAUDE_CODE_OAUTH_TOKEN not set' "$OUT" && pass "mi
 grep -qE "SKIP +VS Code extension" "$OUT" && grep -q 'code --install-extension anthropic.claude-code' "$OUT" \
   && pass "no 'code': skipped with the command to run later" || fail "missing 'code' not reported"
 grep -qE "WARN +AI rules" "$OUT" && pass "no access to AI rules: warns" || fail "AI rules failure not reported"
+grep -qE "WARN +agent memory +~/.claude/settings.json isn't valid JSON" "$OUT" && [ "$(cat "$S")" = '{not json' ] \
+  && pass "invalid settings.json: warns and leaves it alone" || fail "invalid settings.json not handled"
+rm "$S" "$FIX/bin/gh"
+install || fail "exited non-zero without gh"
+grep -qE "WARN +agent memory +gh not logged in" "$OUT" && pass "no gh: memory warns" || fail "missing gh not reported"
+AGENT_MEMORY=off install || fail "exited non-zero with AGENT_MEMORY=off"
+grep -qE "SKIP +agent memory +AGENT_MEMORY=off" "$OUT" && pass "AGENT_MEMORY=off skips the step" || fail "opt-out ignored"
 
 note "Fatal errors still print the summary"
 if REPO_RAW="file:///nonexistent" install; then fail "missing source should fail"; fi

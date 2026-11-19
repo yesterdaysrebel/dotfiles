@@ -11,7 +11,7 @@
 #               browser render the rest as raw text; zsh treats it as a comment.
 #
 # Debian/Ubuntu only (VMs, codespaces, devcontainers). Needs zsh, git and curl;
-# jq, vim and the `claude`/`code` CLIs are used when present. Never installs
+# jq, vim, docker and the `claude`/`code`/`gh` CLIs are used when present. Never installs
 # system packages. Safe to re-run: unchanged files are left alone and anything
 # it would overwrite is backed up first.
 
@@ -313,6 +313,69 @@ setup_claude_auth() {
   fi
 }
 
+# Only the keys memory needs are merged into settings.json; the rest of it is the user's.
+# Re-running replaces our hook entries (matched by script name, so venkat's old ones too).
+merge_claude_settings() {
+  local f=~/.claude/settings.json hook="~/.claude/hooks/agent-memory-sync.sh" tmp src
+  if ! command -v jq >/dev/null 2>&1; then
+    step WARN "jq missing; ~/.claude/settings.json not updated"; return 1
+  fi
+  src="$f"; [[ -s "$f" ]] || src=/dev/null
+  tmp="$(mktemp "${f:h}/.${f:t}.XXXXXX")"
+  if ! jq -s --arg hook "$hook" --argjson perms \
+      '["Read(~/.agent-memory/**)", "Edit(~/.agent-memory/memory/**)", "Edit(~/.agent-memory/projects/**)"]' '
+      def mine: (.command // "") | test("agent-memory-sync\\.sh");
+      def wire($ev; $h): .hooks[$ev] = ([(.hooks[$ev] // [])[]
+        | .hooks = [(.hooks // [])[] | select(mine | not)] | select(.hooks | length > 0)] + [{hooks: [$h]}]);
+      (.[0] // {})
+      | .autoMemoryDirectory = "~/.agent-memory/memory"
+      | .permissions.allow = ((.permissions.allow // []) as $a | $a + ($perms - $a))
+      | wire("SessionStart"; {type: "command", command: ($hook + " start"), timeout: 120})
+      | wire("Stop"; {type: "command", command: ($hook + " push")})
+    ' "$src" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; step WARN "~/.claude/settings.json isn't valid JSON; left it alone"; return 1
+  fi
+  if [[ -f "$f" ]] && cmp -s "$tmp" "$f"; then rm -f "$tmp"; return 0; fi
+  backup_one "$f"; mv "$tmp" "$f"
+  log "  updated: $f"
+}
+
+# Claude's auto memory synced to a private repo by claude/hooks/agent-memory-sync.sh.
+install_agent_memory() {
+  CURRENT="agent memory"
+  if [[ "${AGENT_MEMORY:-}" == off ]]; then step SKIP "AGENT_MEMORY=off"; return 0; fi
+  local hook=~/.claude/hooks/agent-memory-sync.sh me repo out
+  local slug_re='^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$'
+  install_file "${REPO_RAW}/claude/hooks/agent-memory-sync.sh" "$hook"
+  chmod 700 "$hook"
+  merge_claude_settings || return 0
+  if ! command -v gh >/dev/null 2>&1 || ! me="$(gh api user --jq .login </dev/null 2>/dev/null)"; then
+    step WARN "gh not logged in; memory won't sync"; hint "gh auth login, then re-run"; return 0
+  fi
+  repo="${AGENT_MEMORY_REPO:-${me}/agent-memory}"
+  if [[ ! "$repo" =~ $slug_re ]]; then
+    step WARN "AGENT_MEMORY_REPO='${repo}' isn't owner/name"; return 0
+  fi
+  command -v docker >/dev/null 2>&1 && "$hook" prefetch
+  if out="$(gh repo view "$repo" --json isPrivate,owner --jq '"\(.isPrivate) \(.owner.login)"' </dev/null 2>&1)"; then
+    if [[ "$out" == "true ${me}" ]]; then
+      step OK "${repo} (private)"
+    else
+      step WARN "${repo} isn't a private repo owned by ${me}; memory won't push"
+      hint "make it private (or set AGENT_MEMORY_REPO), then re-run"
+    fi
+  # Create only on a clear "not found", only in your own account, and always private.
+  elif [[ "$out" == *"Could not resolve to a Repository"* && "${repo%%/*}" == "$me" ]]; then
+    if gh repo create "$repo" --private --add-readme --description "Claude Code agent memory" </dev/null >/dev/null 2>&1; then
+      step OK "${repo} (created, private)"
+    else
+      step WARN "couldn't create ${repo}"; hint "gh repo create ${repo} --private --add-readme, then re-run"
+    fi
+  else
+    step WARN "can't check ${repo} on GitHub (offline, or no access)"
+  fi
+}
+
 # `code` only works from a VS Code terminal (Remote-SSH, devcontainer, codespace).
 install_vscode_extension() {
   CURRENT="VS Code extension"
@@ -344,6 +407,7 @@ main() {
   install_zsh_plugins
   install_vim_plugins
   setup_claude_auth
+  install_agent_memory
   install_vscode_extension
   print -r -- ""
   print -r -- "Next: start a fresh shell ('exec zsh'); reload tmux with 'tmux source-file ~/.tmux.conf'."
