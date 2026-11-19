@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/yesterdaysrebel/dotfiles/compare/v1.0.0...v1.0.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* pick the newest tag when only one exists and there is no TTY ([c820739](https://github.com/yesterdaysrebel/dotfiles/commit/c820739e23e693b7fcfcf3fca74bc889707da158))
+* pick the newest tag when only one exists and there is no TTY ([3b6ab4c](https://github.com/yesterdaysrebel/dotfiles/commit/3b6ab4c8c6ff56dda549fabcf78b5129c49bf515))
+
 ## 1.0.0 (2026-11-18)
 
 
