@@ -34,6 +34,20 @@ Re-run any time to update; files you changed are backed up to
   editing `~/.zshrc` (delete `~/.oh-my-zsh/custom/dotfiles.zsh` to opt out)
 - tmux with mouse and clipboard support (`prefix + ?` shows a cheat sheet), vim with plugins
 - The `anthropic.claude-code` VS Code extension, when run from a VS Code terminal
+- Claude Code memory that follows you between codespaces (see below)
+
+## Agent memory
+
+Claude's auto memory (`~/.agent-memory/memory/`) and per-repo notes
+(`~/.agent-memory/projects/<owner>/<repo>.md`) sync to a private GitHub repo,
+`<your gh login>/agent-memory`. The installer creates it (private) if it doesn't exist.
+A hook pulls at session start and pushes after every turn, only to a private repo you
+own, and only after a gitleaks scan (needs Docker).
+
+- Use another repo: `AGENT_MEMORY_REPO=<your login>/name` (a private repo under your gh
+  login; set it before the first install, since it's only read when cloning)
+- Turn it off: `AGENT_MEMORY=off` (for the installer and the hook)
+- Problems show as `[agent-memory] WARNING` at the start of a Claude session.
 
 ## Development
 
