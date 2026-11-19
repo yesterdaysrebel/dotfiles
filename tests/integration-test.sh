@@ -38,13 +38,20 @@ zsh -n "$REPO/dotfiles.zsh" && pass "zsh -n parses dotfiles.zsh" || fail "dotfil
 
 note "Version resolution (local git fixture, no TTY)"
 src="$FIX/dotfiles-src"; git init -q -b main "$src"
-git -C "$src" commit -q --allow-empty -m one; git -C "$src" tag -a v1.0.0 -m v1.0.0
+raw="https://raw.githubusercontent.com/yesterdaysrebel/dotfiles"
+resolve() { REPO_GIT="$src" DOTFILES_RESOLVE_ONLY=1 zsh "$REPO/index.html" 2>/dev/null | grep "^REPO_RAW=" || true; }
+git -C "$src" commit -q --allow-empty -m one
+got="$(resolve)"
+[ "$got" = "REPO_RAW=$raw/$(git -C "$src" rev-parse main)" ] \
+  && pass "no TTY + no tags falls back to main" || fail "no-tag default wrong: $got"
+git -C "$src" tag -a v1.0.0 -m v1.0.0
+got="$(resolve)"   # one tag: a one-element array must not be indexed by character
+[ "$got" = "REPO_RAW=$raw/$(git -C "$src" rev-parse 'v1.0.0^{commit}')" ] \
+  && pass "no TTY + a single tag picks that tag" || fail "single-tag default wrong: $got"
 git -C "$src" commit -q --allow-empty -m two; git -C "$src" tag v1.1.0
 git -C "$src" checkout -q -b feat/main; git -C "$src" commit -q --allow-empty -m three; git -C "$src" checkout -q main
 want_tag="$(git -C "$src" rev-parse 'v1.0.0^{commit}')"; want_new="$(git -C "$src" rev-parse v1.1.0)"
 want_main="$(git -C "$src" rev-parse main)"
-raw="https://raw.githubusercontent.com/yesterdaysrebel/dotfiles"
-resolve() { REPO_GIT="$src" DOTFILES_RESOLVE_ONLY=1 zsh "$REPO/index.html" 2>/dev/null | grep "^REPO_RAW="; }
 got="$(DOTFILES_REF=v1.0.0 resolve)"
 [ "$got" = "REPO_RAW=$raw/$want_tag" ] && pass "annotated tag resolves to its commit SHA" || fail "tag resolution wrong: $got"
 got="$(resolve)"
