@@ -10,3 +10,11 @@ Some imported files mention Copilot; apply them the same way here.
 @~/.local/share/ai-rules-central/.github/instructions/copilot-workspace.instructions.md
 @~/.local/share/ai-rules-central/.github/instructions/coding-behavior.instructions.md
 @~/.local/share/ai-rules-central/.github/repo-conventions.md
+
+## Code reviews
+
+These rules apply to every review, including `/ai-review`, and override the imported files.
+
+- Never post comments, reviews or approvals to a PR yourself.
+- End with a list of findings, each with `path:line`, severity, and comment text ready
+  to paste into the PR.
